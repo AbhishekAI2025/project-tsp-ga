@@ -1,38 +1,26 @@
-CC ?= gcc
-MPICC ?= mpicc
+CC ?= mpicc
 CFLAGS ?= -std=c11 -Wall -Wextra -O2
-MPI_CFLAGS ?= $(CFLAGS)
-INCLUDES := -Isrc
 
-SERIAL_SRCS := src/tsp.c src/ga_common.c src/ga_serial.c src/cli.c src/serial_main.c
-PARALLEL_SRCS := src/tsp.c src/ga_common.c src/parallel_ga.c src/cli.c src/main.c
+SRC_DIR := src
+SRCS := $(SRC_DIR)/main.c \
+        $(SRC_DIR)/ga.c \
+        $(SRC_DIR)/parallel_ga.c \
+        $(SRC_DIR)/tsp_utils.c \
+        $(SRC_DIR)/random_utils.c
 
-SERIAL_OBJS := $(patsubst src/%.c, build/serial/%.o, $(SERIAL_SRCS))
-PARALLEL_OBJS := $(patsubst src/%.c, build/parallel/%.o, $(PARALLEL_SRCS))
+OBJS := $(SRCS:$(SRC_DIR)/%.c=build/%.o)
 
-.PHONY: all serial parallel clean
+.PHONY: all clean
 
-all: serial
+all: tsp_ga
 
-serial: build/serial_ga
-
-parallel: build/parallel_ga
-
-build/serial_ga: $(SERIAL_OBJS)
+tsp_ga: $(OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SERIAL_OBJS) -lm -o $@
+	$(CC) $(CFLAGS) $(OBJS) -lm -o $@
 
-build/parallel_ga: $(PARALLEL_OBJS)
+build/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(MPICC) $(MPI_CFLAGS) $(PARALLEL_OBJS) -lm -o $@
-
-build/serial/%.o: src/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
-
-build/parallel/%.o: src/%.c
-	@mkdir -p $(dir $@)
-	$(MPICC) $(MPI_CFLAGS) $(INCLUDES) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf build
+	rm -rf build tsp_ga

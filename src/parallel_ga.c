@@ -1,616 +1,586 @@
 #include "parallel_ga.h"
 
+#include "random_utils.h"
+
 #include <float.h>
 #include <mpi.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MIGRATION_INTERVAL 50
 
 typedef struct {
-    Individual *population;
-    Individual *next_population;
+    int size;
+    int **population;
+    int **next_population;
     int *population_storage;
     int *next_storage;
-    int size;
+    double *lengths;
+    double *next_lengths;
+    double *fitness;
+    double *next_fitness;
 } PopulationBuffers;
 
-static void select_best_indices(const Individual *population, int population_size, int count, int *indices) {
-    for (int i = 0; i < count; ++i) {
-        indices[i] = -1;
-    }
-    double *lengths = malloc((size_t)count * sizeof(double));
-    if (!lengths) {
-        return;
-    }
-    for (int i = 0; i < count; ++i) {
-        lengths[i] = DBL_MAX;
+static double **g_dist_matrix = NULL;
+static int g_num_cities = 0;
+static int g_total_population = 0;
+
+static int **allocate_population_array(int population_size, int num_cities, int **storage_out) {
+    int **array = calloc((size_t)population_size, sizeof(int *));
+    int *storage = malloc((size_t)population_size * (size_t)num_cities * sizeof(int));
+    if (!array || !storage) {
+        free(array);
+        free(storage);
+        return NULL;
     }
     for (int i = 0; i < population_size; ++i) {
-        const double length = population[i].length;
-        for (int pos = 0; pos < count; ++pos) {
-            if (length < lengths[pos]) {
-                for (int shift = count - 1; shift > pos; --shift) {
-                    lengths[shift] = lengths[shift - 1];
-                    indices[shift] = indices[shift - 1];
-                }
-                lengths[pos] = length;
-                indices[pos] = i;
-                break;
-            }
-        }
+        array[i] = storage + (size_t)i * (size_t)num_cities;
     }
-    free(lengths);
+    *storage_out = storage;
+    return array;
 }
 
-static void select_worst_indices(const Individual *population, int population_size, int count, int *indices) {
-    for (int i = 0; i < count; ++i) {
-        indices[i] = -1;
-    }
-    double *lengths = malloc((size_t)count * sizeof(double));
-    if (!lengths) {
-        return;
-    }
-    for (int i = 0; i < count; ++i) {
-        lengths[i] = -DBL_MAX;
-    }
-    for (int i = 0; i < population_size; ++i) {
-        const double length = population[i].length;
-        for (int pos = 0; pos < count; ++pos) {
-            if (length > lengths[pos]) {
-                for (int shift = count - 1; shift > pos; --shift) {
-                    lengths[shift] = lengths[shift - 1];
-                    indices[shift] = indices[shift - 1];
-                }
-                lengths[pos] = length;
-                indices[pos] = i;
-                break;
-            }
-        }
-    }
-    free(lengths);
-}
-
-static int allocate_population_buffers(PopulationBuffers *buffers, int population_size, int dimension) {
+static int allocate_population_buffers(PopulationBuffers *buffers, int population_size, int num_cities) {
+    memset(buffers, 0, sizeof(*buffers));
     buffers->size = population_size;
-    buffers->population = calloc((size_t)population_size, sizeof(Individual));
-    buffers->next_population = calloc((size_t)population_size, sizeof(Individual));
-    if (!buffers->population || !buffers->next_population) {
+    buffers->population = allocate_population_array(population_size, num_cities, &buffers->population_storage);
+    buffers->next_population = allocate_population_array(population_size, num_cities, &buffers->next_storage);
+    buffers->lengths = calloc((size_t)population_size, sizeof(double));
+    buffers->next_lengths = calloc((size_t)population_size, sizeof(double));
+    buffers->fitness = calloc((size_t)population_size, sizeof(double));
+    buffers->next_fitness = calloc((size_t)population_size, sizeof(double));
+    if (!buffers->population || !buffers->next_population || !buffers->lengths || !buffers->next_lengths ||
+        !buffers->fitness || !buffers->next_fitness) {
         free(buffers->population);
         free(buffers->next_population);
-        buffers->population = NULL;
-        buffers->next_population = NULL;
-        return -1;
-    }
-    buffers->population_storage = malloc((size_t)population_size * (size_t)dimension * sizeof(int));
-    buffers->next_storage = malloc((size_t)population_size * (size_t)dimension * sizeof(int));
-    if (!buffers->population_storage || !buffers->next_storage) {
         free(buffers->population_storage);
         free(buffers->next_storage);
-        free(buffers->population);
-        free(buffers->next_population);
-        buffers->population = NULL;
-        buffers->next_population = NULL;
-        buffers->population_storage = NULL;
-        buffers->next_storage = NULL;
+        free(buffers->lengths);
+        free(buffers->next_lengths);
+        free(buffers->fitness);
+        free(buffers->next_fitness);
+        memset(buffers, 0, sizeof(*buffers));
         return -1;
-    }
-    for (int i = 0; i < population_size; ++i) {
-        buffers->population[i].tour = buffers->population_storage + (size_t)i * (size_t)dimension;
-        buffers->next_population[i].tour = buffers->next_storage + (size_t)i * (size_t)dimension;
     }
     return 0;
 }
 
 static void free_population_buffers(PopulationBuffers *buffers) {
+    if (!buffers) {
+        return;
+    }
     free(buffers->population);
     free(buffers->next_population);
     free(buffers->population_storage);
     free(buffers->next_storage);
-    buffers->population = NULL;
-    buffers->next_population = NULL;
-    buffers->population_storage = NULL;
-    buffers->next_storage = NULL;
-    buffers->size = 0;
+    free(buffers->lengths);
+    free(buffers->next_lengths);
+    free(buffers->fitness);
+    free(buffers->next_fitness);
+    memset(buffers, 0, sizeof(*buffers));
 }
 
-static int resize_population_buffers(PopulationBuffers *buffers, int new_size, int dimension,
-                                     const TSPInstance *instance) {
+static void initialize_individual(int *tour, int num_cities) {
+    for (int i = 0; i < num_cities; ++i) {
+        tour[i] = i;
+    }
+    shuffle_array(tour, num_cities);
+}
+
+static void evaluate_individual(const int *tour, double *length_out, double *fitness_out) {
+    double length = evaluate_tour((int *)tour, g_dist_matrix, g_num_cities);
+    if (length_out) {
+        *length_out = length;
+    }
+    if (fitness_out) {
+        *fitness_out = 1.0 / (length + 1e-9);
+    }
+}
+
+static void select_best_indices(const double *lengths, int population_size, int count, int *indices) {
+    if (count <= 0) {
+        return;
+    }
+    char *selected = calloc((size_t)population_size, sizeof(char));
+    if (!selected) {
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        double best_length = DBL_MAX;
+        int best_idx = 0;
+        for (int j = 0; j < population_size; ++j) {
+            if (selected[j]) {
+                continue;
+            }
+            if (lengths[j] < best_length) {
+                best_length = lengths[j];
+                best_idx = j;
+            }
+        }
+        indices[i] = best_idx;
+        selected[best_idx] = 1;
+    }
+    free(selected);
+}
+
+static void select_worst_indices(const double *lengths, int population_size, int count, int *indices) {
+    if (count <= 0) {
+        return;
+    }
+    char *selected = calloc((size_t)population_size, sizeof(char));
+    if (!selected) {
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        double worst_length = -DBL_MAX;
+        int worst_idx = 0;
+        for (int j = 0; j < population_size; ++j) {
+            if (selected[j]) {
+                continue;
+            }
+            if (lengths[j] > worst_length) {
+                worst_length = lengths[j];
+                worst_idx = j;
+            }
+        }
+        indices[i] = worst_idx;
+        selected[worst_idx] = 1;
+    }
+    free(selected);
+}
+
+static int resize_population_buffers(PopulationBuffers *buffers, int new_size, int num_cities) {
     if (new_size == buffers->size) {
         return 0;
     }
 
-    Individual *old_population = buffers->population;
-    Individual *old_next = buffers->next_population;
-    int *old_storage = buffers->population_storage;
-    int *old_next_storage = buffers->next_storage;
-    int old_size = buffers->size;
-
     PopulationBuffers new_buffers = {0};
-    if (allocate_population_buffers(&new_buffers, new_size, dimension) != 0) {
+    if (allocate_population_buffers(&new_buffers, new_size, num_cities) != 0) {
         return -1;
     }
 
-    const int keep = old_population ? (old_size < new_size ? old_size : new_size) : 0;
-    if (old_population && keep > 0) {
-        int *indices = malloc((size_t)keep * sizeof(int));
-        int *selected = calloc((size_t)old_size, sizeof(int));
-        if (!indices || !selected) {
-            free(indices);
-            free(selected);
+    int keep = buffers->size < new_size ? buffers->size : new_size;
+    if (keep > 0 && buffers->population) {
+        int *best_indices = malloc((size_t)keep * sizeof(int));
+        if (!best_indices) {
             free_population_buffers(&new_buffers);
             return -1;
         }
+        select_best_indices(buffers->lengths, buffers->size, keep, best_indices);
         for (int i = 0; i < keep; ++i) {
-            double best_length = DBL_MAX;
-            int best_idx = -1;
-            for (int j = 0; j < old_size; ++j) {
-                if (selected[j]) {
-                    continue;
-                }
-                if (old_population[j].length < best_length) {
-                    best_length = old_population[j].length;
-                    best_idx = j;
-                }
-            }
-            if (best_idx >= 0) {
-                selected[best_idx] = 1;
-                indices[i] = best_idx;
-            } else {
-                indices[i] = 0;
-            }
+            int src_idx = best_indices[i];
+            memcpy(new_buffers.population[i], buffers->population[src_idx],
+                   (size_t)num_cities * sizeof(int));
+            new_buffers.lengths[i] = buffers->lengths[src_idx];
+            new_buffers.fitness[i] = buffers->fitness[src_idx];
         }
-        free(selected);
-        for (int i = 0; i < keep; ++i) {
-            ga_copy_individual(&old_population[indices[i]], &new_buffers.population[i], dimension);
-        }
-        free(indices);
+        free(best_indices);
     }
 
     for (int i = keep; i < new_size; ++i) {
-        ga_initialize_individual(&new_buffers.population[i], instance);
+        initialize_individual(new_buffers.population[i], num_cities);
+        two_opt(new_buffers.population[i], g_dist_matrix, num_cities);
+        evaluate_individual(new_buffers.population[i], &new_buffers.lengths[i], &new_buffers.fitness[i]);
     }
 
-    for (int i = 0; i < new_size; ++i) {
-        /* ensure derived metrics are up to date */
-        ga_evaluate_individual(&new_buffers.population[i], instance);
-    }
-
-    buffers->population = new_buffers.population;
-    buffers->next_population = new_buffers.next_population;
-    buffers->population_storage = new_buffers.population_storage;
-    buffers->next_storage = new_buffers.next_storage;
-    buffers->size = new_buffers.size;
-
-    free(old_population);
-    free(old_next);
-    free(old_storage);
-    free(old_next_storage);
+    free_population_buffers(buffers);
+    *buffers = new_buffers;
     return 0;
 }
 
-static void integrate_elites(PopulationBuffers *buffers, const TSPInstance *instance, const int *elite_tours,
-                             const double *elite_lengths, int elite_count, int dimension) {
-    if (elite_count <= 0 || buffers->size == 0) {
+void migrate_elites(int **population, double *lengths, double *fitness, int population_size, int num_cities,
+                    int rank, int size, MPI_Comm comm) {
+    int local_elite_count = (int)(0.05 * population_size);
+    if (local_elite_count < 1) {
+        local_elite_count = 1;
+    }
+
+    int *elite_indices = malloc((size_t)local_elite_count * sizeof(int));
+    if (!elite_indices) {
         return;
     }
-    const int replace_count = elite_count < buffers->size ? elite_count : buffers->size;
-    int *worst_indices = malloc((size_t)replace_count * sizeof(int));
-    if (!worst_indices) {
+    select_best_indices(lengths, population_size, local_elite_count, elite_indices);
+
+    int *send_tours = malloc((size_t)local_elite_count * (size_t)num_cities * sizeof(int));
+    double *send_lengths = malloc((size_t)local_elite_count * sizeof(double));
+    if (!send_tours || !send_lengths) {
+        free(elite_indices);
+        free(send_tours);
+        free(send_lengths);
         return;
     }
-    select_worst_indices(buffers->population, buffers->size, replace_count, worst_indices);
-    for (int i = 0; i < replace_count; ++i) {
-        const int dest_idx = worst_indices[i] >= 0 ? worst_indices[i] : i;
-        memcpy(buffers->population[dest_idx].tour, elite_tours + (size_t)i * (size_t)dimension,
-               (size_t)dimension * sizeof(int));
-        buffers->population[dest_idx].length = elite_lengths[i];
-        buffers->population[dest_idx].fitness = 1.0 / (elite_lengths[i] + 1e-9);
+    for (int i = 0; i < local_elite_count; ++i) {
+        int idx = elite_indices[i];
+        memcpy(send_tours + (size_t)i * (size_t)num_cities, population[idx], (size_t)num_cities * sizeof(int));
+        send_lengths[i] = lengths[idx];
     }
-    free(worst_indices);
+    free(elite_indices);
+
+    int *counts = NULL;
+    int *tour_counts = NULL;
+    int *tour_displs = NULL;
+    int *length_displs = NULL;
+    int total_elites = 0;
+    int total_tour_entries = 0;
+    if (rank == 0) {
+        counts = calloc((size_t)size, sizeof(int));
+        tour_counts = calloc((size_t)size, sizeof(int));
+        tour_displs = calloc((size_t)size, sizeof(int));
+        length_displs = calloc((size_t)size, sizeof(int));
+    }
+
+    int send_count = local_elite_count;
+    MPI_Gather(&send_count, 1, MPI_INT, counts, 1, MPI_INT, 0, comm);
+
+    if (rank == 0) {
+        int offset_tour = 0;
+        int offset_length = 0;
+        for (int i = 0; i < size; ++i) {
+            tour_counts[i] = counts[i] * num_cities;
+            tour_displs[i] = offset_tour;
+            length_displs[i] = offset_length;
+            offset_tour += tour_counts[i];
+            offset_length += counts[i];
+        }
+        total_tour_entries = offset_tour;
+        total_elites = offset_length;
+    }
+
+    int *all_tours = NULL;
+    double *all_lengths = NULL;
+    if (rank == 0 && total_tour_entries > 0) {
+        all_tours = malloc((size_t)total_tour_entries * sizeof(int));
+    }
+    if (rank == 0 && total_elites > 0) {
+        all_lengths = malloc((size_t)total_elites * sizeof(double));
+    }
+
+    MPI_Gatherv(send_tours, local_elite_count * num_cities, MPI_INT, all_tours, tour_counts, tour_displs, MPI_INT, 0,
+                comm);
+    MPI_Gatherv(send_lengths, local_elite_count, MPI_DOUBLE, all_lengths, counts, length_displs, MPI_DOUBLE, 0, comm);
+
+    free(send_tours);
+    free(send_lengths);
+
+    int global_elite_count = (int)(0.05 * g_total_population);
+    if (global_elite_count < 1) {
+        global_elite_count = 1;
+    }
+    if (rank == 0 && total_elites < global_elite_count) {
+        global_elite_count = total_elites;
+    }
+
+    int *broadcast_tours = NULL;
+    double *broadcast_lengths = NULL;
+    if (rank == 0 && global_elite_count > 0) {
+        broadcast_tours = malloc((size_t)global_elite_count * (size_t)num_cities * sizeof(int));
+        broadcast_lengths = malloc((size_t)global_elite_count * sizeof(double));
+        if (!broadcast_tours || !broadcast_lengths) {
+            free(broadcast_tours);
+            free(broadcast_lengths);
+            global_elite_count = 0;
+        }
+    }
+
+    if (rank == 0 && global_elite_count > 0) {
+        int *selected_indices = calloc((size_t)global_elite_count, sizeof(int));
+        if (!selected_indices) {
+            global_elite_count = 0;
+        } else {
+            char *used = calloc((size_t)total_elites, sizeof(char));
+            if (!used) {
+                global_elite_count = 0;
+            } else {
+                for (int i = 0; i < global_elite_count; ++i) {
+                    double best_length = DBL_MAX;
+                    int best_idx = 0;
+                    for (int j = 0; j < total_elites; ++j) {
+                        if (used[j]) {
+                            continue;
+                        }
+                        if (all_lengths[j] < best_length) {
+                            best_length = all_lengths[j];
+                            best_idx = j;
+                        }
+                    }
+                    used[best_idx] = 1;
+                    selected_indices[i] = best_idx;
+                    memcpy(broadcast_tours + (size_t)i * (size_t)num_cities,
+                           all_tours + (size_t)best_idx * (size_t)num_cities,
+                           (size_t)num_cities * sizeof(int));
+                    broadcast_lengths[i] = all_lengths[best_idx];
+                }
+                free(used);
+            }
+            free(selected_indices);
+        }
+    }
+
+    MPI_Bcast(&global_elite_count, 1, MPI_INT, 0, comm);
+
+    if (global_elite_count > 0) {
+        if (rank != 0) {
+            broadcast_tours = malloc((size_t)global_elite_count * (size_t)num_cities * sizeof(int));
+            broadcast_lengths = malloc((size_t)global_elite_count * sizeof(double));
+        }
+        MPI_Bcast(broadcast_tours, global_elite_count * num_cities, MPI_INT, 0, comm);
+        MPI_Bcast(broadcast_lengths, global_elite_count, MPI_DOUBLE, 0, comm);
+
+        int replace_count = global_elite_count < population_size ? global_elite_count : population_size;
+        int *worst_indices = malloc((size_t)replace_count * sizeof(int));
+        if (worst_indices) {
+            select_worst_indices(lengths, population_size, replace_count, worst_indices);
+            for (int i = 0; i < replace_count; ++i) {
+                int dest = worst_indices[i];
+                memcpy(population[dest], broadcast_tours + (size_t)i * (size_t)num_cities,
+                       (size_t)num_cities * sizeof(int));
+                evaluate_individual(population[dest], &lengths[dest], &fitness[dest]);
+            }
+            free(worst_indices);
+        }
+        free(broadcast_tours);
+        free(broadcast_lengths);
+    }
+
+    if (rank == 0) {
+        free(all_tours);
+        free(all_lengths);
+        free(counts);
+        free(tour_counts);
+        free(tour_displs);
+        free(length_displs);
+    }
 }
 
-int ga_run_parallel(const TSPInstance *instance, const GAParams *params, Individual *best_out, int log_interval,
-                    MPI_Comm comm, FILE *log_stream) {
-    const int dimension = instance->dimension;
-    int world_size = 0;
+int run_parallel_ga(const City *cities, int num_cities, double **dist_matrix, const GAParams *params, int *best_tour,
+                    double *best_length, MPI_Comm comm) {
+    if (!cities || num_cities <= 0 || !dist_matrix || !params) {
+        return -1;
+    }
+
     int world_rank = 0;
-    MPI_Comm_size(comm, &world_size);
+    int world_size = 0;
     MPI_Comm_rank(comm, &world_rank);
+    MPI_Comm_size(comm, &world_size);
+
+    g_dist_matrix = dist_matrix;
+    g_num_cities = num_cities;
+    g_total_population = params->population_size;
 
     int base = params->population_size / world_size;
     int remainder = params->population_size % world_size;
     int local_size = base + (world_rank < remainder ? 1 : 0);
-
-    if (local_size <= 0) {
-        local_size = 1;
+    if (local_size < 2) {
+        local_size = 2;
     }
 
-    ga_seed_rng(params->seed + (unsigned int)world_rank * 17u);
+    seed_random(params->seed + (unsigned int)world_rank * 97u);
+    set_two_opt_limit(params->two_opt_max_swaps);
 
     PopulationBuffers buffers = {0};
-    if (allocate_population_buffers(&buffers, local_size, dimension) != 0) {
-        if (log_stream && world_rank == 0) {
-            fprintf(log_stream, "Failed to allocate population buffers for rank %d\n", world_rank);
-        }
+    if (allocate_population_buffers(&buffers, local_size, num_cities) != 0) {
         return -1;
     }
-
-    for (int i = 0; i < local_size; ++i) {
-        ga_initialize_individual(&buffers.population[i], instance);
-    }
-
-    Individual global_best = {0};
-    global_best.tour = malloc((size_t)dimension * sizeof(int));
-    if (!global_best.tour) {
-        free_population_buffers(&buffers);
-        return -1;
-    }
-    global_best.length = DBL_MAX;
-    global_best.fitness = 0.0;
-
-    Individual local_best = {0};
-    local_best.tour = malloc((size_t)dimension * sizeof(int));
-    if (!local_best.tour) {
-        free(global_best.tour);
-        free_population_buffers(&buffers);
-        return -1;
-    }
-    local_best.length = DBL_MAX;
-    local_best.fitness = 0.0;
 
     for (int i = 0; i < buffers.size; ++i) {
-        if (buffers.population[i].length < local_best.length) {
-            ga_copy_individual(&buffers.population[i], &local_best, dimension);
+        initialize_individual(buffers.population[i], num_cities);
+        two_opt(buffers.population[i], dist_matrix, num_cities);
+        evaluate_individual(buffers.population[i], &buffers.lengths[i], &buffers.fitness[i]);
+    }
+
+    double local_best_length = DBL_MAX;
+    int *local_best_tour = malloc((size_t)num_cities * sizeof(int));
+    int *global_best_tour = malloc((size_t)num_cities * sizeof(int));
+    if (!local_best_tour || !global_best_tour) {
+        free(local_best_tour);
+        free(global_best_tour);
+        free_population_buffers(&buffers);
+        return -1;
+    }
+
+    for (int i = 0; i < buffers.size; ++i) {
+        if (buffers.lengths[i] < local_best_length) {
+            local_best_length = buffers.lengths[i];
+            memcpy(local_best_tour, buffers.population[i], (size_t)num_cities * sizeof(int));
         }
     }
 
     struct {
-        double length;
+        double value;
         int rank;
-    } local_info = {local_best.length, world_rank};
-    struct {
-        double length;
-        int rank;
-    } global_info = {0.0, 0};
+    } local_info = {local_best_length, world_rank}, global_info = {0.0, 0};
+
     MPI_Allreduce(&local_info, &global_info, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
     if (world_rank == global_info.rank) {
-        ga_copy_individual(&local_best, &global_best, dimension);
+        memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
     }
-    MPI_Bcast(global_best.tour, dimension, MPI_INT, global_info.rank, comm);
-    MPI_Bcast(&global_best.length, 1, MPI_DOUBLE, global_info.rank, comm);
-    global_best.fitness = 1.0 / (global_best.length + 1e-9);
+    MPI_Bcast(global_best_tour, num_cities, MPI_INT, global_info.rank, comm);
+    double global_best_length = 0.0;
+    if (world_rank == global_info.rank) {
+        global_best_length = local_best_length;
+    }
+    MPI_Bcast(&global_best_length, 1, MPI_DOUBLE, global_info.rank, comm);
 
     double block_start = MPI_Wtime();
 
     for (int generation = 0; generation < params->generations; ++generation) {
-        ga_copy_individual(&global_best, &buffers.next_population[0], dimension);
-        int fill_index = 1;
-        while (fill_index < buffers.size) {
-            const int parent_a_idx = ga_tournament_select(buffers.population, buffers.size, params->tournament_size);
-            const int parent_b_idx = ga_tournament_select(buffers.population, buffers.size, params->tournament_size);
-            const Individual *parent_a = &buffers.population[parent_a_idx];
-            const Individual *parent_b = &buffers.population[parent_b_idx];
+        memcpy(buffers.next_population[0], global_best_tour, (size_t)num_cities * sizeof(int));
+        buffers.next_lengths[0] = global_best_length;
+        buffers.next_fitness[0] = 1.0 / (global_best_length + 1e-9);
 
-            Individual *child1 = &buffers.next_population[fill_index];
-            Individual *child2 = NULL;
-            if (fill_index + 1 < buffers.size) {
-                child2 = &buffers.next_population[fill_index + 1];
-            }
+        for (int i = 1; i < buffers.size; ++i) {
+            int parent_a_idx = 0;
+            int parent_b_idx = 0;
+            tournament_selection(buffers.population, buffers.fitness, buffers.size, params->tournament_size,
+                                 &parent_a_idx);
+            tournament_selection(buffers.population, buffers.fitness, buffers.size, params->tournament_size,
+                                 &parent_b_idx);
 
-            if (ga_random_unit() < params->crossover_rate) {
-                ga_pmx_crossover(parent_a->tour, parent_b->tour, child1->tour, dimension);
-                if (child2) {
-                    ga_pmx_crossover(parent_b->tour, parent_a->tour, child2->tour, dimension);
-                }
+            if (rand_double() < params->crossover_rate) {
+                pmx_crossover(buffers.population[parent_a_idx], buffers.population[parent_b_idx],
+                              buffers.next_population[i], num_cities);
             } else {
-                ga_copy_individual(parent_a, child1, dimension);
-                if (child2) {
-                    ga_copy_individual(parent_b, child2, dimension);
-                }
+                memcpy(buffers.next_population[i], buffers.population[parent_a_idx], (size_t)num_cities * sizeof(int));
             }
 
-            if (ga_random_unit() < params->mutation_rate) {
-                ga_inversion_mutation(child1->tour, dimension);
-            }
-            ga_two_opt_local_search(child1->tour, instance, params->two_opt_iterations);
-            ga_evaluate_individual(child1, instance);
-
-            if (child2) {
-                if (ga_random_unit() < params->mutation_rate) {
-                    ga_inversion_mutation(child2->tour, dimension);
-                }
-                ga_two_opt_local_search(child2->tour, instance, params->two_opt_iterations);
-                ga_evaluate_individual(child2, instance);
-            }
-
-            fill_index += (child2 ? 2 : 1);
+            inversion_mutation(buffers.next_population[i], num_cities, params->mutation_rate);
+            two_opt(buffers.next_population[i], dist_matrix, num_cities);
+            evaluate_individual(buffers.next_population[i], &buffers.next_lengths[i], &buffers.next_fitness[i]);
         }
 
-        Individual *tmp_pop = buffers.population;
+        int **tmp_pop = buffers.population;
         buffers.population = buffers.next_population;
         buffers.next_population = tmp_pop;
 
-        local_best.length = DBL_MAX;
+        double *tmp_lengths = buffers.lengths;
+        buffers.lengths = buffers.next_lengths;
+        buffers.next_lengths = tmp_lengths;
+
+        double *tmp_fitness = buffers.fitness;
+        buffers.fitness = buffers.next_fitness;
+        buffers.next_fitness = tmp_fitness;
+
+        local_best_length = DBL_MAX;
         for (int i = 0; i < buffers.size; ++i) {
-            if (buffers.population[i].length < local_best.length) {
-                ga_copy_individual(&buffers.population[i], &local_best, dimension);
+            if (buffers.lengths[i] < local_best_length) {
+                local_best_length = buffers.lengths[i];
+                memcpy(local_best_tour, buffers.population[i], (size_t)num_cities * sizeof(int));
             }
         }
 
-        local_info.length = local_best.length;
+        local_info.value = local_best_length;
         local_info.rank = world_rank;
-        global_info.length = 0.0;
-        global_info.rank = 0;
         MPI_Allreduce(&local_info, &global_info, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
 
         if (world_rank == global_info.rank) {
-            ga_copy_individual(&local_best, &global_best, dimension);
+            memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
+            global_best_length = local_best_length;
         }
-        MPI_Bcast(global_best.tour, dimension, MPI_INT, global_info.rank, comm);
-        MPI_Bcast(&global_best.length, 1, MPI_DOUBLE, global_info.rank, comm);
-        global_best.fitness = 1.0 / (global_best.length + 1e-9);
+        MPI_Bcast(global_best_tour, num_cities, MPI_INT, global_info.rank, comm);
+        MPI_Bcast(&global_best_length, 1, MPI_DOUBLE, global_info.rank, comm);
 
         if ((generation + 1) % MIGRATION_INTERVAL == 0) {
-            int local_elite_count = (int)(0.05 * buffers.size);
-            if (local_elite_count < 1) {
-                local_elite_count = 1;
-            }
-            int *elite_indices = malloc((size_t)local_elite_count * sizeof(int));
-            if (!elite_indices) {
-                free(global_best.tour);
-                free(local_best.tour);
-                free_population_buffers(&buffers);
-                return -1;
-            }
-            select_best_indices(buffers.population, buffers.size, local_elite_count, elite_indices);
-
-            int send_count = local_elite_count * dimension;
-            int *send_buffer = malloc((size_t)send_count * sizeof(int));
-            double *send_lengths = malloc((size_t)local_elite_count * sizeof(double));
-            if (!send_buffer || !send_lengths) {
-                free(elite_indices);
-                free(send_buffer);
-                free(send_lengths);
-                free(global_best.tour);
-                free(local_best.tour);
-                free_population_buffers(&buffers);
-                return -1;
-            }
-            for (int i = 0; i < local_elite_count; ++i) {
-                const int idx = elite_indices[i] >= 0 ? elite_indices[i] : 0;
-                memcpy(send_buffer + (size_t)i * (size_t)dimension, buffers.population[idx].tour,
-                       (size_t)dimension * sizeof(int));
-                send_lengths[i] = buffers.population[idx].length;
-            }
-            free(elite_indices);
-
-            int *elite_counts = malloc((size_t)world_size * sizeof(int));
-            int *recv_counts_int = malloc((size_t)world_size * sizeof(int));
-            int *displs_int = malloc((size_t)world_size * sizeof(int));
-            int *length_displs = malloc((size_t)world_size * sizeof(int));
-            int *all_tours = NULL;
-            double *all_lengths = NULL;
-            int total_elites = 0;
-
-            if (!elite_counts || !recv_counts_int || !displs_int || !length_displs) {
-                free(elite_counts);
-                free(recv_counts_int);
-                free(displs_int);
-                free(length_displs);
-                free(send_buffer);
-                free(send_lengths);
-                free(global_best.tour);
-                free(local_best.tour);
-                free_population_buffers(&buffers);
-                return -1;
-            }
-
-            for (int i = 0; i < world_size; ++i) {
-                elite_counts[i] = 0;
-                recv_counts_int[i] = 0;
-                displs_int[i] = 0;
-                length_displs[i] = 0;
-            }
-
-            int send_elites_metric = local_elite_count;
-            MPI_Gather(&send_elites_metric, 1, MPI_INT, elite_counts, 1, MPI_INT, 0, comm);
-
-            if (world_rank == 0) {
-                int offset_int = 0;
-                int offset_len = 0;
-                for (int i = 0; i < world_size; ++i) {
-                    const int count = elite_counts[i];
-                    recv_counts_int[i] = count * dimension;
-                    displs_int[i] = offset_int;
-                    length_displs[i] = offset_len;
-                    offset_int += recv_counts_int[i];
-                    offset_len += count;
-                    total_elites += count;
-                }
-                if (offset_int > 0) {
-                    all_tours = malloc((size_t)offset_int * sizeof(int));
-                }
-                if (total_elites > 0) {
-                    all_lengths = malloc((size_t)total_elites * sizeof(double));
-                }
-            }
-
-            MPI_Gatherv(send_buffer, send_elites_metric * dimension, MPI_INT, all_tours, recv_counts_int,
-                        displs_int, MPI_INT, 0, comm);
-            MPI_Gatherv(send_lengths, send_elites_metric, MPI_DOUBLE, all_lengths, elite_counts,
-                        length_displs, MPI_DOUBLE, 0, comm);
-
-            free(send_buffer);
-            free(send_lengths);
-
-            int global_elite_count = (int)(0.05 * params->population_size);
-            if (global_elite_count < 1) {
-                global_elite_count = 1;
-            }
-            int *global_elite_tours = NULL;
-            double *global_elite_lengths = NULL;
-
-            if (world_rank == 0) {
-                if (total_elites < global_elite_count) {
-                    global_elite_count = total_elites;
-                }
-                if (global_elite_count > 0) {
-                    global_elite_tours =
-                        malloc((size_t)global_elite_count * (size_t)dimension * sizeof(int));
-                    global_elite_lengths = malloc((size_t)global_elite_count * sizeof(double));
-                }
-                int *best_indices = global_elite_count > 0
-                                        ? malloc((size_t)global_elite_count * sizeof(int))
-                                        : NULL;
-                if ((global_elite_count > 0) &&
-                    (!global_elite_tours || !global_elite_lengths || !best_indices)) {
-                    free(global_elite_tours);
-                    free(global_elite_lengths);
-                    free(best_indices);
-                    global_elite_tours = NULL;
-                    global_elite_lengths = NULL;
-                    global_elite_count = 0;
-                } else if (global_elite_count > 0) {
-                    for (int i = 0; i < global_elite_count; ++i) {
-                        double best_length = DBL_MAX;
-                        int best_idx = -1;
-                        for (int j = 0; j < total_elites; ++j) {
-                            int already_selected = 0;
-                            for (int k = 0; k < i; ++k) {
-                                if (best_indices[k] == j) {
-                                    already_selected = 1;
-                                    break;
-                                }
-                            }
-                            if (already_selected) {
-                                continue;
-                            }
-                            if (all_lengths[j] < best_length) {
-                                best_length = all_lengths[j];
-                                best_idx = j;
-                            }
-                        }
-                        if (best_idx >= 0) {
-                            best_indices[i] = best_idx;
-                            memcpy(global_elite_tours + (size_t)i * (size_t)dimension,
-                                   all_tours + (size_t)best_idx * (size_t)dimension, (size_t)dimension * sizeof(int));
-                            global_elite_lengths[i] = all_lengths[best_idx];
-                        }
-                    }
-                    free(best_indices);
-                }
-            }
-
-            MPI_Bcast(&global_elite_count, 1, MPI_INT, 0, comm);
-            if (global_elite_count > 0) {
-                if (world_rank != 0) {
-                    global_elite_tours = malloc((size_t)global_elite_count * (size_t)dimension * sizeof(int));
-                    global_elite_lengths = malloc((size_t)global_elite_count * sizeof(double));
-                }
-                MPI_Bcast(global_elite_tours, global_elite_count * dimension, MPI_INT, 0, comm);
-                MPI_Bcast(global_elite_lengths, global_elite_count, MPI_DOUBLE, 0, comm);
-                integrate_elites(&buffers, instance, global_elite_tours, global_elite_lengths, global_elite_count,
-                                  dimension);
-                free(global_elite_tours);
-                free(global_elite_lengths);
-            }
-
-            if (world_rank == 0) {
-                free(all_tours);
-                free(all_lengths);
-            }
-            free(elite_counts);
-            free(recv_counts_int);
-            free(displs_int);
-            free(length_displs);
+            migrate_elites(buffers.population, buffers.lengths, buffers.fitness, buffers.size, num_cities, world_rank,
+                           world_size, comm);
 
             double block_end = MPI_Wtime();
             double local_block_time = block_end - block_start;
             double *all_block_times = malloc((size_t)world_size * sizeof(double));
-            MPI_Allgather(&local_block_time, 1, MPI_DOUBLE, all_block_times, 1, MPI_DOUBLE, comm);
-
-            double total_speed = 0.0;
-            double *speed = malloc((size_t)world_size * sizeof(double));
-            for (int i = 0; i < world_size; ++i) {
-                speed[i] = all_block_times[i] > 0.0 ? (1.0 / all_block_times[i]) : 1.0;
-                total_speed += speed[i];
-            }
-
+            double *speeds = malloc((size_t)world_size * sizeof(double));
             int *new_sizes = malloc((size_t)world_size * sizeof(int));
-            int assigned = 0;
-            for (int i = 0; i < world_size; ++i) {
-                double fraction = speed[i] / total_speed;
-                new_sizes[i] = (int)(params->population_size * fraction);
-                if (new_sizes[i] < 1) {
-                    new_sizes[i] = 1;
+            if (all_block_times && speeds && new_sizes) {
+                MPI_Allgather(&local_block_time, 1, MPI_DOUBLE, all_block_times, 1, MPI_DOUBLE, comm);
+                double total_speed = 0.0;
+                for (int i = 0; i < world_size; ++i) {
+                    speeds[i] = all_block_times[i] > 0.0 ? 1.0 / all_block_times[i] : 1.0;
+                    total_speed += speeds[i];
                 }
-                assigned += new_sizes[i];
-            }
-            while (assigned < params->population_size) {
-                int best_idx = 0;
-                double best_speed = speed[0];
-                for (int i = 1; i < world_size; ++i) {
-                    if (speed[i] > best_speed) {
-                        best_speed = speed[i];
-                        best_idx = i;
+                int assigned = 0;
+                for (int i = 0; i < world_size; ++i) {
+                    double fraction = speeds[i] / total_speed;
+                    new_sizes[i] = (int)(g_total_population * fraction);
+                    if (new_sizes[i] < 2) {
+                        new_sizes[i] = 2;
+                    }
+                    assigned += new_sizes[i];
+                }
+                while (assigned < g_total_population) {
+                    int best_idx = 0;
+                    double best_speed = speeds[0];
+                    for (int i = 1; i < world_size; ++i) {
+                        if (speeds[i] > best_speed) {
+                            best_speed = speeds[i];
+                            best_idx = i;
+                        }
+                    }
+                    new_sizes[best_idx] += 1;
+                    assigned += 1;
+                }
+                while (assigned > g_total_population) {
+                    int worst_idx = 0;
+                    double worst_speed = speeds[0];
+                    for (int i = 1; i < world_size; ++i) {
+                        if (speeds[i] < worst_speed && new_sizes[i] > 2) {
+                            worst_speed = speeds[i];
+                            worst_idx = i;
+                        }
+                    }
+                    if (new_sizes[worst_idx] > 2) {
+                        new_sizes[worst_idx] -= 1;
+                        assigned -= 1;
+                    } else {
+                        break;
                     }
                 }
-                new_sizes[best_idx] += 1;
-                assigned += 1;
-            }
-            while (assigned > params->population_size) {
-                int worst_idx = 0;
-                double worst_speed = speed[0];
-                for (int i = 1; i < world_size; ++i) {
-                    if (speed[i] < worst_speed && new_sizes[i] > 1) {
-                        worst_speed = speed[i];
-                        worst_idx = i;
+
+                MPI_Bcast(new_sizes, world_size, MPI_INT, 0, comm);
+                int desired_size = new_sizes[world_rank];
+                if (desired_size != buffers.size) {
+                    if (resize_population_buffers(&buffers, desired_size, num_cities) != 0) {
+                        free(all_block_times);
+                        free(speeds);
+                        free(new_sizes);
+                        free(local_best_tour);
+                        free(global_best_tour);
+                        free_population_buffers(&buffers);
+                        return -1;
                     }
                 }
-                if (new_sizes[worst_idx] > 1) {
-                    new_sizes[worst_idx] -= 1;
-                    assigned -= 1;
-                } else {
-                    break;
-                }
             }
-
-            int new_size = local_size;
-            if (new_sizes) {
-                new_size = new_sizes[world_rank];
-            }
-
-            block_start = MPI_Wtime();
-
-            MPI_Bcast(new_sizes, world_size, MPI_INT, 0, comm);
-            new_size = new_sizes[world_rank];
-
             free(all_block_times);
-            free(speed);
+            free(speeds);
             free(new_sizes);
-
-            if (resize_population_buffers(&buffers, new_size, dimension, instance) != 0) {
-                free(global_best.tour);
-                free(local_best.tour);
-                free_population_buffers(&buffers);
-                return -1;
-            }
-            local_size = new_size;
-        }
-
-        if (log_stream && world_rank == 0 &&
-            (generation % log_interval == 0 || generation == params->generations - 1)) {
-            fprintf(log_stream, "[MPI] Generation %d global best %.3f\n", generation, global_best.length);
+            block_start = MPI_Wtime();
         }
     }
 
-    if (best_out && best_out->tour) {
-        ga_copy_individual(&global_best, best_out, dimension);
+    local_best_length = DBL_MAX;
+    for (int i = 0; i < buffers.size; ++i) {
+        if (buffers.lengths[i] < local_best_length) {
+            local_best_length = buffers.lengths[i];
+            memcpy(local_best_tour, buffers.population[i], (size_t)num_cities * sizeof(int));
+        }
+    }
+    local_info.value = local_best_length;
+    local_info.rank = world_rank;
+    MPI_Allreduce(&local_info, &global_info, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+    if (world_rank == global_info.rank) {
+        memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
+        global_best_length = local_best_length;
+    }
+    MPI_Bcast(global_best_tour, num_cities, MPI_INT, global_info.rank, comm);
+    MPI_Bcast(&global_best_length, 1, MPI_DOUBLE, global_info.rank, comm);
+
+    if (best_tour && world_rank == 0) {
+        memcpy(best_tour, global_best_tour, (size_t)num_cities * sizeof(int));
+    }
+    if (best_length && world_rank == 0) {
+        *best_length = global_best_length;
     }
 
-    free(global_best.tour);
-    free(local_best.tour);
+    free(local_best_tour);
+    free(global_best_tour);
     free_population_buffers(&buffers);
     return 0;
 }
