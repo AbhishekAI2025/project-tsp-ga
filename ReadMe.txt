@@ -143,6 +143,8 @@ Prerequisites
 Building
 --------
 ```
+make clean && make CC=mpicc
+
 # serial executable (always available)
 make serial
 
