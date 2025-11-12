@@ -149,6 +149,23 @@ CC=mpicc-openmpi make       # override the compiler wrapper if needed
 ```
 Object files land in `build/`, and `./tsp_ga` is emitted at the repository root.
 
+Troubleshooting the Build
+-------------------------
+If `make` fails with `arm64-apple-darwin20.0.0-clang: command not found`, the `mpicc` wrapper that was picked up (often Conda’s OpenMPI) cannot find its companion Clang toolchain. Quick fixes:
+1. Temporarily point the build to Homebrew’s OpenMPI wrapper:
+   ```
+   export CC=/opt/homebrew/bin/mpicc
+   make clean && make
+   ```
+2. Or keep Conda’s wrapper but tell OpenMPI to call the system compilers:
+   ```
+   export OMPI_CC=/usr/bin/clang
+   export OMPI_CXX=/usr/bin/clang++
+   make clean && make
+   ```
+3. Longer-term, install the missing Conda compilers so the wrapper’s expected binaries exist:  
+   `conda install -c conda-forge clang_osx-arm64 clangxx_osx-arm64`
+
 Running the Serial Baseline
 ---------------------------
 Serial runs use a single MPI rank; you can launch the binary directly or via `mpirun -np 1` if your MPI distribution insists on it.
