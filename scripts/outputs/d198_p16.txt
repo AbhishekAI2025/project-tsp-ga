@@ -1,0 +1,4 @@
+----- RUN START: 2025-11-12 13:04:41 -----
+/usr/bin/time: illegal option -- f
+usage: time [-al] [-h | -p] [-o file] utility [argument ...]
+----- RUN END: 2025-11-12 13:04:41 -----
