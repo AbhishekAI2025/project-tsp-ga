@@ -142,41 +142,40 @@ Prerequisites
 
 Building
 --------
+The `Makefile` produces a single MPI-aware executable named `tsp_ga`. It defaults to `mpicc`, so ensure your MPI compiler wrapper is on `PATH`.
 ```
-make clean && make CC=mpicc
-
-# serial executable (always available)
-make serial
-
-# parallel executable (requires mpicc in PATH)
-make parallel
-
-# override compilers if needed
-CC=clang make serial
-MPICC=mpicc-openmpi make parallel
+make clean && make          # build with mpicc
+CC=mpicc-openmpi make       # override the compiler wrapper if needed
 ```
-Artifacts are written to `build/serial_ga` and `build/parallel_ga`.
+Object files land in `build/`, and `./tsp_ga` is emitted at the repository root.
 
 Running the Serial Baseline
 ---------------------------
+Serial runs use a single MPI rank; you can launch the binary directly or via `mpirun -np 1` if your MPI distribution insists on it.
 ```
-./build/serial_ga --instance data/berlin52.tsp --generations 200 --log-interval 50
-./build/serial_ga --instance data/d198.tsp --generations 200 --log-interval 50
-./build/serial_ga --instance data/pr439.tsp --generations 200 --log-interval 50
+./tsp_ga data/berlin52.tsp --generations 200
+./tsp_ga data/d198.tsp --generations 200
+./tsp_ga data/pr439.tsp --generations 200
 ```
-Default GA settings follow the specification (population 200, crossover 0.8,
-mutation 0.05, tournament size 4, two-opt iterations 20, seed 42). Override any
+Default GA settings match `src/main.c` (population 256, crossover 0.9,
+mutation 0.05, tournament size 4, two-opt swap limit 2000, seed 42). Override any
 parameter through CLI flags (`--population`, `--mutation`, etc.).
 
 Parallel Execution
 ------------------
 ```
-mpirun -np 8 ./build/parallel_ga --instance data/berlin52.tsp --generations 200 \
-  --log-interval 50 --seed 1234
+mpirun -np 8 ./tsp_ga data/berlin52.tsp --generations 200 --seed 1234
 ```
 Every 50 generations each rank broadcasts its top 5% tours; rank 0 selects the
 global elite set and redistributes them. After the migration phase, wall-clock
 times from the last interval are collected to rebalance subpopulation sizes.
+
+Demo Quickstart
+---------------
+1. `make clean && make CC=mpicc`
+2. `./tsp_ga data/berlin52.tsp --generations 200 > outputs/demo_serial.log`
+3. `mpirun -np 8 ./tsp_ga data/d198.tsp --generations 200 > outputs/demo_parallel.log`
+4. Compare the two logs to discuss convergence, best tour length, and runtime in the professor meeting.
 
 Sample Serial Results
 ---------------------
@@ -190,7 +189,7 @@ Raw logs for these runs are stored under `outputs/`.
 
 Experiments & Reporting
 -----------------------
-1. Build both executables (`make serial parallel`).
+1. Build the MPI-aware binary (`make`, optionally overriding `CC` for your MPI wrapper).
 2. Collect serial baselines for each instance (see table above).
 3. Run the MPI GA with 2, 4, 8, 16, and 32 ranks, recording runtime, best tour
    and migration/rebalance statistics (script template in `paper/paper.md`).
