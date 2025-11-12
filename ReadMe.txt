@@ -166,6 +166,41 @@ If `make` fails with `arm64-apple-darwin20.0.0-clang: command not found`, the `m
 3. Longer-term, install the missing Conda compilers so the wrapper’s expected binaries exist:  
    `conda install -c conda-forge clang_osx-arm64 clangxx_osx-arm64`
 
+Windows Setup Guide
+-------------------
+Running the project on Windows works best through one of these environments:
+
+**Option A – WSL2 (recommended)**
+1. Enable “Windows Subsystem for Linux” and install Ubuntu 22.04 from the Microsoft Store.
+2. Inside the Ubuntu terminal run:
+   ```
+   sudo apt update
+   sudo apt install build-essential openmpi-bin libopenmpi-dev make git
+   ```
+3. Clone this repository inside WSL (`git clone …`) and run the usual commands:
+   ```
+   make clean && make
+   ./tsp_ga data/berlin52.tsp --generations 200
+   mpirun -np 8 ./tsp_ga data/d198.tsp --generations 200 --seed 1234
+   ```
+
+**Option B – Native Windows via MSYS2**
+1. Install [MSYS2](https://www.msys2.org/) and open the *UCRT64* shell (the only one that ships OpenMPI).
+2. Update and install dependencies:
+   ```
+   pacman -Syu
+   pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-openmpi make git
+   ```
+3. Ensure `C:\msys64\ucrt64\bin` is on your PATH (or stay inside the UCRT64 shell).
+4. Clone the repo, then build with:
+   ```
+   export CC=mpicc
+   make clean && make
+   ```
+5. Run commands exactly as on macOS/Linux. Use `mpirun.exe` for multi-rank runs.
+
+Tip: in either environment, verify MPI availability with `mpicc --version` and `mpirun --version` before building.
+
 Running the Serial Baseline
 ---------------------------
 Serial runs use a single MPI rank; you can launch the binary directly or via `mpirun -np 1` if your MPI distribution insists on it.
