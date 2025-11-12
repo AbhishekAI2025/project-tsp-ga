@@ -17,6 +17,7 @@ static void print_usage(void) {
             "  --mutation <double>   Mutation rate (default 0.05)\n"
             "  --tournament <int>    Tournament size (default 4)\n"
             "  --two-opt <int>       Two-opt max swaps per tour (default 2000)\n"
+            "  --sync-interval <int> Generations between MPI best-tour syncs (default 10)\n"
             "  --seed <uint>         RNG seed (default 42)\n"
             "  --help                Show this message\n");
 }
@@ -48,6 +49,8 @@ static int parse_arguments(int argc, char **argv, GAParams *params, char **insta
             params->tournament_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--two-opt") == 0 && i + 1 < argc) {
             params->two_opt_max_swaps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--sync-interval") == 0 && i + 1 < argc) {
+            params->sync_interval = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             params->seed = (unsigned int)strtoul(argv[++i], NULL, 10);
         } else {
@@ -59,7 +62,8 @@ static int parse_arguments(int argc, char **argv, GAParams *params, char **insta
         }
     }
 
-    if (params->population_size < 2 || params->generations <= 0 || params->tournament_size < 2) {
+    if (params->population_size < 2 || params->generations <= 0 || params->tournament_size < 2 ||
+        params->sync_interval <= 0) {
         if (rank == 0) {
             fprintf(stderr, "Invalid GA parameters.\n");
         }
@@ -91,6 +95,7 @@ int main(int argc, char **argv) {
         .tournament_size = 4,
         .two_opt_max_swaps = 2000,
         .seed = 42u,
+        .sync_interval = 10,
     };
 
     char *instance_path = NULL;

@@ -1,4 +1,4 @@
------ RUN START: 2025-11-12 13:08:18 -----
+----- RUN START: 2025-11-12 15:36:25 -----
 No PMIx server was reachable, but a PMI1/2 was detected.
 If srun is being used to launch application,  16 singletons will be started.
 Instance: /Users/abhishekkumarjha/Documents/project-tsp-ga/data/berlin52.tsp
@@ -82,6 +82,6 @@ Generations: 200 | Population: 256 | Mutation: 0.050 | Crossover: 0.900
 Best tour length: 7544.366
 Tour (1-based): 32 45 19 41 8 9 10 43 33 51 11 52 14 13 47 26 27 28 12 25 4 6 15 5 24 48 38 37 40 39 36 35 34 44 46 16 29 50 20 23 30 2 7 42 21 17 3 18 31 22 1 49 32
 real 0.75
-user 3.68
-sys 0.33
------ RUN END: 2025-11-12 13:08:19 -----
+user 3.64
+sys 0.31
+----- RUN END: 2025-11-12 15:36:25 -----

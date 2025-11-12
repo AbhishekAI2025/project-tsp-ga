@@ -11,6 +11,7 @@ typedef struct {
     int tournament_size;
     int two_opt_max_swaps;
     unsigned int seed;
+    int sync_interval;  // MPI best-tour synchronization interval (generations)
 } GAParams;
 
 double evaluate_tour(int *tour, double **dist_matrix, int num_cities);

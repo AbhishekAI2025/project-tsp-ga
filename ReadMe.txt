@@ -212,6 +212,9 @@ Serial runs use a single MPI rank; you can launch the binary directly or via `mp
 Default GA settings match `src/main.c` (population 256, crossover 0.9,
 mutation 0.05, tournament size 4, two-opt swap limit 2000, seed 42). Override any
 parameter through CLI flags (`--population`, `--mutation`, etc.).
+For MPI runs you can also throttle best-tour broadcasts with `--sync-interval N`
+(default 10 generations) to amortise communication overhead; set `N=1` to match
+the previous “sync every generation” behaviour.
 
 Parallel Execution
 ------------------
@@ -221,6 +224,9 @@ mpirun -np 8 ./tsp_ga data/berlin52.tsp --generations 200 --seed 1234
 Every 50 generations each rank broadcasts its top 5% tours; rank 0 selects the
 global elite set and redistributes them. After the migration phase, wall-clock
 times from the last interval are collected to rebalance subpopulation sizes.
+Tune `--sync-interval` to control how frequently ranks exchange the global best
+tour outside of the migration cycles—larger values reduce MPI chatter at the
+cost of slightly slower elite propagation.
 
 Demo Quickstart
 ---------------

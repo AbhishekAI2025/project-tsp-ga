@@ -367,6 +367,7 @@ int run_parallel_ga(const City *cities, int num_cities, double **dist_matrix, co
     g_dist_matrix = dist_matrix;
     g_num_cities = num_cities;
     g_total_population = params->population_size;
+    const int sync_interval = params->sync_interval > 0 ? params->sync_interval : 1;
 
     int base = params->population_size / world_size;
     int remainder = params->population_size % world_size;
@@ -469,16 +470,22 @@ int run_parallel_ga(const City *cities, int num_cities, double **dist_matrix, co
             }
         }
 
-        local_info.value = local_best_length;
-        local_info.rank = world_rank;
-        MPI_Allreduce(&local_info, &global_info, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+        int sync_now = ((generation + 1) % sync_interval == 0) || (generation == params->generations - 1);
+        if (sync_now) {
+            local_info.value = local_best_length;
+            local_info.rank = world_rank;
+            MPI_Allreduce(&local_info, &global_info, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
 
-        if (world_rank == global_info.rank) {
-            memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
+            if (world_rank == global_info.rank) {
+                memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
+                global_best_length = local_best_length;
+            }
+            MPI_Bcast(global_best_tour, num_cities, MPI_INT, global_info.rank, comm);
+            MPI_Bcast(&global_best_length, 1, MPI_DOUBLE, global_info.rank, comm);
+        } else if (local_best_length < global_best_length) {
             global_best_length = local_best_length;
+            memcpy(global_best_tour, local_best_tour, (size_t)num_cities * sizeof(int));
         }
-        MPI_Bcast(global_best_tour, num_cities, MPI_INT, global_info.rank, comm);
-        MPI_Bcast(&global_best_length, 1, MPI_DOUBLE, global_info.rank, comm);
 
         if ((generation + 1) % MIGRATION_INTERVAL == 0) {
             migrate_elites(buffers.population, buffers.lengths, buffers.fitness, buffers.size, num_cities, world_rank,
