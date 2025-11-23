@@ -46,17 +46,27 @@
 | pr439    | 110 660.59  | 55.68       |
 * Each best tour meets the ≤5 % quality target; detailed logs show convergence plateaus for tuning discussion.
 
-## Slide 9 – Upcoming Experiments
+## Slide 9 – Single-Node Scaling (M3 Air, 8 cores, 200 gens, seed 42)
+| Instance | np=2 | np=4 | np=8 |
+|----------|------|------|------|
+| berlin52 | 0.25 | 0.19 | 0.24 |
+| d198     | 3.08 | 1.95 | 2.00 |
+| pr439    | 30.70| 18.35| 15.92|
+* Modest speedup only on pr439; berlin52/d198 are too short for MPI overhead to amortise.
+* No runs above 8 ranks—M3 Air has 4P+4E cores; oversubscribe hurts performance.
+* To show clearer scaling, plan to increase generations/population and reduce sync frequency.
+
+## Slide 10 – Upcoming Experiments
 * Sweep ranks {2,4,8,16,32} on the lab cluster; capture runtime, best tour, migration count per block.
 * Automate plotting (Python script) for speedup/efficiency + convergence.
 * Stress-test load balancer by injecting heterogeneous sleep delays to confirm redistribution logic.
 
-## Slide 10 – Risks / Support Needed
+## Slide 11 – Risks / Support Needed
 * Need confirmed access to OpenMPI nodes with ≥32 ranks; cluster queue limits may bottleneck.
 * mpiP instrumentation adds overhead—plan to capture both instrumented and clean runs.
 * Large TSPLIB files increase 2-opt cost; may need guidance on acceptable generation count vs. runtime.
 
-## Slide 11 – Demo & Runbook
+## Slide 12 – Demo & Runbook
 ```
 make clean && make CC=mpicc                # produces ./tsp_ga
 ./tsp_ga data/berlin52.tsp --generations 200                # serial (single core via MPI rank 0)
@@ -65,7 +75,7 @@ mpirun -np 8 ./tsp_ga data/d198.tsp --generations 200 --seed 2024     # parallel
 * Logs land on stdout; redirect to `outputs/` for archival.
 * Use `--population`, `--mutation`, or `--two-opt` to demonstrate parameter sensitivity live.
 
-## Slide 12 – Closing & Next Steps
+## Slide 13 – Closing & Next Steps
 * Serial baseline verified, MPI logic implemented—ready to capture scaling curves this week.
 * Deliverables in progress: workshop paper draft (`paper/`), refreshed README, and demo-ready code.
 * Request feedback on experiment plan + any metrics the professor wants highlighted in final slides.
