@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DATASETS=("berlin52" "d198" "pr439")
-PROCS=(2 4 8 16 32)
+PROCS=(2 4 8)
 GEN=200
 SEED=42
 
@@ -41,7 +41,8 @@ for dataset in "${DATASETS[@]}"; do
 
     {
       echo "----- RUN START: ${timestamp} -----"
-      /usr/bin/time -p mpirun -np "${np}" "${BIN}" "${dataset_path}" --generations "${GEN}" --seed "${SEED}"
+      # --oversubscribe avoids failures on laptops with fewer hardware slots than requested
+      /usr/bin/time -p mpirun --oversubscribe -np "${np}" "${BIN}" "${dataset_path}" --generations "${GEN}" --seed "${SEED}"
       echo "----- RUN END: $(date +"%Y-%m-%d %H:%M:%S") -----"
     } &> "${outfile}"
 
