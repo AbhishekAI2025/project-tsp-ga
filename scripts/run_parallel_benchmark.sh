@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-DATASETS=("berlin52" "d198" "pr439")
+DATASETS=("berlin52" "d198" "pr439" "pr1002")
 PROCS=(2 4 8)
 GEN=200
 SEED=42

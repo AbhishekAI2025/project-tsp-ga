@@ -31,7 +31,7 @@ Build a Parallel Hybrid Genetic Algorithm for TSP using MPI, compare it with a S
 ⸻
 
 3. 📊 Evaluation (Week 5–6)
-	•	Use TSPLIB datasets: berlin52.tsp, d198.tsp, pr439.tsp
+	•	Use TSPLIB datasets: berlin52.tsp, d198.tsp, pr439.tsp, pr1002.tsp
 	•	Record:
 	•	Runtime (serial vs parallel)
 	•	Best tour length

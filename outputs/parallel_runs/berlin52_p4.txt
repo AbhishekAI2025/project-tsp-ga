@@ -1,10 +1,10 @@
------ RUN START: 2025-11-23 12:31:43 -----
+----- RUN START: 2025-11-23 15:21:14 -----
 Instance: /Users/abhishekkumarjha/Documents/project-tsp-ga/data/berlin52.tsp
 Cities: 52
 Generations: 200 | Population: 256 | Mutation: 0.050 | Crossover: 0.900
 Best tour length: 7544.366
 Tour (1-based): 22 1 49 32 45 19 41 8 9 10 43 33 51 11 52 14 13 47 26 27 28 12 25 4 6 15 5 24 48 38 37 40 39 36 35 34 44 46 16 29 50 20 23 30 2 7 42 21 17 3 18 31 22
-real 0.19
-user 0.40
+real 0.17
+user 0.38
 sys 0.03
------ RUN END: 2025-11-23 12:31:43 -----
+----- RUN END: 2025-11-23 15:21:14 -----
